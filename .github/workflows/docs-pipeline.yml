@@ -1,0 +1,91 @@
+name: Trigger TeamCity Docs Pipeline
+
+on:
+  push:
+    tags:
+      - 'testlib-v*'  # Catch any tags like testlib-v1.0.0
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      lib_type: ${{ steps.extract.outputs.lib_type }}
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - name: Extract Tag Info
+        id: extract
+        run: |
+          TAG=${GITHUB_REF#refs/tags/}
+          if [[ $TAG == testlib-v* ]]; then
+            echo "lib_type=testlib" >> $GITHUB_OUTPUT
+            VERSION=${TAG#*v}
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "Unsupported tag format: $TAG"
+            exit 1
+
+  docs-pipeline:
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Ensure TEAMCITY_TOKEN is set
+        env:
+          TEAMCITY_TOKEN: ${{ secrets.TEAMCITY_TOKEN }}
+        run: |
+          if [ -z "$TEAMCITY_TOKEN" ]; then
+            echo "TEAMCITY_TOKEN is missing!"
+            exit 1
+          fi
+
+      - name: Generate Dummy Docs
+        env:
+          LIB_TYPE: ${{ needs.validate-tag.outputs.lib_type }}
+          LIB_VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          mkdir -p docs
+          echo "# Docs for $LIB_TYPE v$LIB_VERSION" > docs/index.md
+
+      - name: Trigger TeamCity Build
+        env:
+          TOKEN: ${{ secrets.TEAMCITY_TOKEN }}
+          LIB_TYPE: ${{ needs.validate-tag.outputs.lib_type }}
+          LIB_VERSION: ${{ needs.validate-tag.outputs.version }}
+        run: |
+          echo "Triggering TeamCity pipeline for $LIB_TYPE $LIB_VERSION"
+          RESPONSE=$(curl -s -S -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -w "%{http_code}" -o /dev/null \
+            -d '{
+              "buildType": {"id": "DocsPipeline"},
+              "triggeringOptions": {
+                "queueAtTop": true
+              },
+              "properties": {
+                "property": [
+                  {"name": "lib.type", "value": "'$LIB_TYPE'"},
+                  {"name": "lib.version", "value": "'$LIB_VERSION'"}
+                ]
+              }
+            }' \
+            https://your-teamcity-server.com/app/rest/buildQueue)
+
+          if [[ "$RESPONSE" != "200" && "$RESPONSE" != "201" && "$RESPONSE" != "204" ]]; then
+            echo "❌ TeamCity trigger failed! HTTP code: $RESPONSE"
+            exit 1
+          fi
+          echo "✅ TeamCity triggered successfully!"
+
+      - name: Archive Docs
+        uses: actions/upload-artifact@v4
+        with:
+          name: testlib-docs
+          path: docs/
+          retention-days: 3
